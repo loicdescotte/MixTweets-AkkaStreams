@@ -1,6 +1,3 @@
-MixedTweets
-=================
-
 Play, Akka Streams and Twitter streaming POC.
 
 Using Twitter streaming API, OAuth, Server Sent Events and dynamic number Twitter streams.
