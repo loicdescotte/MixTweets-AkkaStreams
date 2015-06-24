@@ -84,9 +84,6 @@ object Application extends Controller {
   
   def stream(query: String) = Action {
 
-    implicit val system = ActorSystem("mixedTweets")
-    implicit val materializer = ActorFlowMaterializer()
-
     val twitterStreamListener = new TwitterStreamListener(config)    
 
     query.split(",").foreach { query =>     
