@@ -27,20 +27,18 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import play.api.libs.streams.Streams
 import play.api.libs.streams.Streams._
 
-case class TweetInfo(searchQuery: String, message: String, author: String)
+case class TweetInfo(searchQuery: String, message: String, author: String){
+  def toJson = Json.obj("message" -> s"${this.searchQuery} : ${this.message}", "author" -> s"${this.author}")
+}
 
-class TwitterStreamListener(searchQuery: String, config: Configuration) {
+class TwitterStreamListener(config: Configuration) {
 
   implicit val system = ActorSystem("mixedTweets")
   implicit val materializer = ActorFlowMaterializer()
 
-  val query = new FilterQuery(0, Array(), Array(searchQuery))
+  val (actorRef, publisher) =  Source.actorRef[JsValue](1000, OverflowStrategy.fail).toMat(Sink.publisher)(Keep.both).run()
  
-  val twitterStream = new TwitterStreamFactory(config).getInstance
- 
-  def listenAndStream = {
-
-    val (actorRef, publisher) =  Source.actorRef[TweetInfo](1000, OverflowStrategy.fail).toMat(Sink.publisher)(Keep.both).run()
+  def listenAndStream(searchQuery: String) = {
 
     Logger.info(s"#start listener for $searchQuery")
  
@@ -49,7 +47,7 @@ class TwitterStreamListener(searchQuery: String, config: Configuration) {
       override def onStatus(status: TwitterStatus) = {   
        Logger.debug(status.getText)
        //push elements into a publisher
-       actorRef ! TweetInfo(searchQuery, status.getText, status.getUser.getName)
+       actorRef ! TweetInfo(searchQuery, status.getText, status.getUser.getName).toJson
       }
  
       override def onDeletionNotice(statusDeletionNotice: StatusDeletionNotice) = {}
@@ -63,11 +61,10 @@ class TwitterStreamListener(searchQuery: String, config: Configuration) {
       override def onStallWarning(warning: StallWarning) = {}
  
     }
- 
+
+    val twitterStream = new TwitterStreamFactory(config).getInstance 
     twitterStream.addListener(statusListener)
-    twitterStream.filter(query)
-    
-    Source(publisher)
+    twitterStream.filter(new FilterQuery(0, Array(), Array(searchQuery)))    
   }
  
 }
@@ -75,18 +72,13 @@ class TwitterStreamListener(searchQuery: String, config: Configuration) {
 
 object Application extends Controller { 
 
-  def sourceToEnumerator[Out, Mat](source: Source[Out, Mat])(implicit fm: FlowMaterializer): Enumerator[Out] = {
-    val pubr: Publisher[Out] = source.runWith(Sink.publisher[Out])
-    Streams.publisherToEnumerator(pubr)
-  }
-
   val cb = new ConfigurationBuilder()
   //TODO replace with your credentials
-  cb.setDebugEnabled(true)
-  .setOAuthConsumerKey("xxx")
-  .setOAuthConsumerSecret("xxx")
-  .setOAuthAccessToken("xxx")
-  .setOAuthAccessTokenSecret("xxx")
+   cb.setDebugEnabled(true)
+    .setOAuthConsumerKey("xxx")
+    .setOAuthConsumerSecret("xxx")
+    .setOAuthAccessToken("xxx")
+    .setOAuthAccessTokenSecret("xxx")
 
   val config = cb.build
   
@@ -95,34 +87,15 @@ object Application extends Controller {
     implicit val system = ActorSystem("mixedTweets")
     implicit val materializer = ActorFlowMaterializer()
 
-    val toJson = (tweet: TweetInfo) => Json.obj("message" -> s"${tweet.searchQuery} : ${tweet.message}", "author" -> s"${tweet.author}")
+    val twitterStreamListener = new TwitterStreamListener(config)    
 
-    val queries = query.split(",")
-
-    val streams = queries.map { query => 
-      val twitterStreamListener = new TwitterStreamListener(query, config)
-      twitterStreamListener.listenAndStream 
+    query.split(",").foreach { query =>     
+      twitterStreamListener.listenAndStream(query)
     }
 
-    val mergedStream = Source[TweetInfo]() { implicit builder =>
+    val enum : Enumerator[JsValue] = Streams.publisherToEnumerator(twitterStreamListener.publisher)
 
-      val merge = builder.add(Merge[TweetInfo](streams.length))
-
-      for (i <- 0 until streams.length) {
-        builder.addEdge(builder.add(streams(i)), merge.in(i))
-      }
-
-      merge.out
-    }
-
-    //use this when avalaible
-    //val mergedStream = streams.flatten(FlattenStrategy.concat)
-
-    val jsonStream = mergedStream.map(tweets => toJson(tweets))
-
-    val jsonEumerator : Enumerator[JsValue] = sourceToEnumerator(jsonStream)
-
-    Ok.chunked(jsonEumerator through EventSource()).as("text/event-stream")  
+    Ok.chunked(enum through EventSource()).as("text/event-stream")  
   } 
 
   def liveTweets(query: List[String]) = Action {        
